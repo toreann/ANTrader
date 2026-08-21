@@ -5,9 +5,12 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "tsc lib/binance/socket.ts lib/binance/rest.ts lib/format.ts lib/reorder.ts --rootDir lib --outDir .test-build --module commonjs --target es2022 --moduleResolution node --skipLibCheck && node tests/socket.test.cjs && node tests/format.test.cjs && node tests/reorder.test.cjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "lightweight-charts": "^5.2.1",
     "next": "16.3.2",
     "react": "19.2.8",
     "react-dom": "19.2.8"

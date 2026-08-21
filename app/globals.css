@@ -1,1 +1,90 @@
 @import "tailwindcss";
+
+/*
+ * A single committed dark terminal theme.
+ *
+ * Colour discipline: green and red are reserved exclusively for price
+ * direction. Everything structural is greyscale, so when something is coloured
+ * on this screen it always means the market moved.
+ */
+@theme {
+  --color-term-bg: #07090d;
+  --color-term-panel: #0d1117;
+  --color-term-panel-hi: #131922;
+  --color-term-border: #1c232e;
+  --color-term-border-hi: #2a3340;
+  --color-term-text: #e7ebf2;
+  --color-term-muted: #79839a;
+  --color-term-dim: #4d566b;
+  --color-term-up: #26d07c;
+  --color-term-down: #f6465d;
+  --color-term-accent: #4b9fff;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco,
+    "Cascadia Mono", "Roboto Mono", monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-term-bg);
+  color: var(--color-term-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Every figure on screen is tabular so digits never shift width mid-tick. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/*
+ * The per-tick price flash is NOT defined here — it is driven imperatively in
+ * TickerRow via the Web Animations API, because restarting a CSS animation
+ * requires remounting the node and a node replaced ten times a second cannot be
+ * reliably clicked.
+ */
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot {
+    animation: none;
+  }
+}
+
+/* Slim scrollbars, so the table does not grow a chunky OS bar. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-term-border-hi) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-term-border-hi);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
