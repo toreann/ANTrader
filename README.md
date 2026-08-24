@@ -1,8 +1,9 @@
 # ANTrader
 
-A crypto spot terminal. Real-time prices with the day's high, low and a 24h
-trend line per pair; click any row to open it as candlesticks, or drag it by the
-grip to reorder your watchlist.
+A crypto spot terminal. The candlestick chart sits on the left; every watched
+pair is a square tile on the right showing price, 24h change, a 24h trend line
+and the day's high and low. Click a tile to load it in the chart, or drag it by
+the grip to rearrange the grid.
 
 This is **v1**, scoped deliberately narrow: a price dashboard that works
 end-to-end. Alerts and on-chain data are later phases.
@@ -42,34 +43,51 @@ appear to work locally and then fail once deployed.
 When the backend/database phase arrives, it goes in as Next.js API routes
 alongside — not underneath — this path.
 
-### Layout
+### Files
 
 | Path | Role |
 |---|---|
 | `lib/binance/socket.ts` | The one connection. Reconnect with backoff, live SUBSCRIBE/UNSUBSCRIBE reconciliation. |
 | `lib/binance/rest.ts` | Snapshot, candles, trend lines, and per-symbol `tickSize`. |
 | `lib/hooks/useMarketData.ts` | Owns the socket and every piece of state derived from it. |
-| `lib/hooks/usePriceFlash.ts` | The per-tick green/red pulse, shared by the row and card views. |
-| `lib/hooks/useReorder.ts` | Drag-to-reorder gesture handling. |
+| `lib/hooks/usePriceFlash.ts` | The per-tick green/red pulse. |
+| `lib/hooks/useReorder.ts` | Drag-to-reorder gesture handling, in two dimensions. |
 | `lib/reorder.ts` | The pure reorder maths, extracted so it can be tested directly. |
-| `components/Sparkline.tsx` | The per-row 24h trend line — inline SVG, no chart library. |
-| `components/TickerRow.tsx` | Desktop table row. |
-| `components/TickerCard.tsx` | Narrow-screen card — a phone cannot hold five numeric columns. |
+| `components/Sparkline.tsx` | The per-tile 24h trend line — inline SVG, no chart library. |
+| `components/AssetTile.tsx` | One pair as a square tile. |
+| `components/WatchlistGrid.tsx` | The tile grid — one presentation for every screen size. |
+
+## Layout
+
+The chart takes the left column at `xl` and the top when stacked — it is the
+primary panel. Tiles are strictly `aspect-square`, laid out with
+`auto-fill, minmax(9.5rem, 1fr)` so the column count follows the panel width
+rather than a breakpoint: 2 columns on a phone, 3–4 on a desktop.
+
+A square risks looking empty when large and cramped when small, so tile content
+is distributed top to bottom with the trend line as the `flex-1` element — it
+absorbs whatever height is left over. The chart is deliberately **not** square;
+candlesticks need horizontal room for time, and a square chart would waste most
+of a wide screen.
+
+There is one presentation, not one per breakpoint. The previous table-plus-cards
+arrangement mounted both and switched them with CSS, which forced a second
+`useReorder` instance whose hidden geometry was all zeroes.
 
 ## How the two charts differ
 
-Each watchlist row carries a **24h trend line**: 48 half-hourly closes drawn as
+Each tile carries a **24h trend line**: 48 half-hourly closes drawn as
 an inline SVG, with the live ticker price as its tip. It is deliberately not a
 `lightweight-charts` instance — one chart object per row would be far heavier
 than a 20-line path, and a sparkline has no axes, crosshair or zoom to justify it.
 
-Clicking a row opens that pair in the **full candlestick chart**, which is
+Clicking a tile opens that pair in the **full candlestick chart**, which is
 where `lightweight-charts` earns its weight.
 
-The trend line's vertical span is the window's own high and low, so the tip dot
-also shows roughly where price sits in its range — which is why the table has no
-separate range-bar column. The mobile card keeps the exact range bar, since
-vertical space there is free.
+The trend line's vertical span is the window's own high and low, so its tip dot
+also shows roughly where price sits in that range. That is why there is no
+separate range bar: the tile conveys the same thing, and the exact high and low
+are printed underneath.
 
 Trend data refreshes every 5 minutes over REST. Its tip is already live from the
 ticker stream, so the refresh only has to stop the 24h window from sliding out of
@@ -78,23 +96,31 @@ learn something that changes every half hour.
 
 ## Reordering the watchlist
 
-Drag a row by its grip, or focus the grip and use the arrow keys. Order persists
-to localStorage.
+Drag a tile by its grip, or focus the grip and use the arrow keys — left/right
+move by one, up/down by a whole row. Order persists to localStorage.
 
 Built on **Pointer Events**, not the HTML5 drag-and-drop API — that API does not
-fire on touch devices at all, and this list has a mobile presentation. One
-pointer code path covers mouse, touch and pen.
+fire on touch devices at all. One pointer code path covers mouse, touch and pen.
 
-Two rules make the gesture behave:
+A grid makes this genuinely two-dimensional: dragging onto the next tile is
+usually *horizontal*, and crossing a row boundary is both axes at once. Two
+things follow:
 
-- **The grip has `touch-action: none`; the row body must not.** Without it the
-  browser scrolls instead of reporting pointer moves. Applying it to the whole
-  row would stop the watchlist scrolling on a phone, which is why a touch drag
-  only starts from the grip. A mouse can drag from anywhere on the row, since
-  there is a 4px threshold separating a drag from a click.
-- **Drop target is leading-edge against the neighbour's midpoint.** See
-  `resolveDropTarget` in `lib/reorder.ts`; two more obvious rules are both wrong
-  and the reasons are written down there.
+- **Drop target is the nearest slot centre**, with a small hysteresis margin so a
+  tile parked between two slots does not flicker. Uniform squares make nearest-
+  centre unambiguous, unlike the ragged heights of the old list.
+- **Displacement is slot-based.** `slotOffsets` computes the order the grid
+  *would* have and translates each tile from its own rect to the rect of the slot
+  it would occupy. That expresses a row wrap — a tile moving up and to the right
+  — which the old "shift by one row height" model could not represent at all.
+
+And unchanged from the list version, because it is still right:
+
+- **The grip has `touch-action: none`; the tile body must not.** Without it the
+  browser scrolls instead of reporting pointer moves. Applying it to the tile
+  would stop the grid scrolling on a phone, which is why a touch drag only starts
+  from the grip. A mouse can drag from anywhere on the tile, since a 4px
+  threshold separates a drag from a click.
 
 ## Three things that are easy to break
 
@@ -115,11 +141,15 @@ driven through the Web Animations API on a stable node instead.
 duplicate SVG ids in one document are invalid markup that resolve by document
 order rather than by the element that declared them. `useId()` keeps them unique.
 
-**A drag must not swallow the next click.** A row's click handler ignores the
+**A drag must not swallow the next click.** A tile's click handler ignores the
 click that follows a drop, but that suppression has to be *timestamped*, not a
 boolean: a drag ending over a different element than it began on produces no
 click to clear the flag, so a plain boolean would eat the user's next genuine
 click instead.
+
+**Tile labels use `term-muted`, not `term-dim`.** At 10px, `term-dim` measures
+2.6:1 against the panel — under the 4.5:1 AA floor. Hierarchy comes from the
+values being brighter than their labels, not from dimming the labels.
 
 ## Scope note
 
