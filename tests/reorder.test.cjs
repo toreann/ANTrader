@@ -1,9 +1,16 @@
 /**
- * Reorder maths. The drop-target rule is the part worth guarding: it shipped
- * once comparing centre-to-centre, which made the list sit still until a full
- * row of travel.
+ * Reorder maths for a wrapping tile grid.
+ *
+ * The drop-target rule is the part worth guarding: the previous vertical-only
+ * version shipped two wrong rules before the third stuck, and a grid adds the
+ * row-wrap case that a one-dimensional model cannot express at all.
  */
-const { moveItem, resolveDropTarget } = require("../.test-build/reorder.js");
+const {
+  moveItem,
+  resolveGridDropTarget,
+  slotOffsets,
+  columnsPerRow,
+} = require("../.test-build/reorder.js");
 
 let failures = 0;
 const check = (label, actual, expected) => {
@@ -15,6 +22,7 @@ const check = (label, actual, expected) => {
   );
 };
 
+// ---------------------------------------------------------------- moveItem
 const L = ["BTC", "ETH", "SOL", "XRP", "DOGE"];
 
 check("move first to middle", moveItem(L, 0, 2), ["ETH", "SOL", "BTC", "XRP", "DOGE"]);
@@ -28,42 +36,115 @@ check("negative index is a no-op", moveItem(L, -1, 2), L);
 check("source array is not mutated", L, ["BTC", "ETH", "SOL", "XRP", "DOGE"]);
 check("single-item list is a no-op", moveItem(["A"], 0, 0), ["A"]);
 
-// Five uniform 50px rows starting at y=0.
-const H = 50;
+// ------------------------------------------------------ grid under test
+// 3 columns x 2 rows of 100px tiles with a 10px gap:
+//   [0][1][2]
+//   [3][4][5]
+const TILE = 100, GAP = 10, STRIDE = TILE + GAP;
 const geo = {
-  tops: [0, 50, 100, 150, 200],
-  heights: [H, H, H, H, H],
+  rects: [0, 1, 2, 3, 4, 5].map((i) => ({
+    left: (i % 3) * STRIDE,
+    top: Math.floor(i / 3) * STRIDE,
+    width: TILE,
+    height: TILE,
+  })),
 };
-const target = (from, delta) => resolveDropTarget(from, delta, geo, 5);
+const target = (from, dx, dy, hyst) =>
+  resolveGridDropTarget(from, dx, dy, geo, 6, hyst);
 
-check("no movement stays put", target(0, 0), 0);
-check("a quarter row down stays put", target(0, H * 0.25), 0);
-// The regression: this MUST swap at half a row, not a full one.
-check("just under half a row down stays put", target(0, H * 0.49), 0);
-check("just over half a row down swaps", target(0, H * 0.51), 1);
-check("1.4 rows down is still index 1", target(0, H * 1.4), 1);
-check("1.6 rows down reaches index 2", target(0, H * 1.6), 2);
-check("far past the end clamps to last", target(0, H * 99), 4);
+check("no movement stays put", target(0, 0, 0), 0);
 
-check("upward: just over half a row swaps", target(4, -H * 0.51), 3);
-check("upward: just under half stays put", target(4, -H * 0.49), 4);
-check("far past the start clamps to first", target(4, -H * 99), 0);
+// Horizontal — the case a vertical-only model could not do at all.
+check("dragged exactly onto the next tile", target(0, STRIDE, 0), 1);
+check("halfway across stays put", target(0, 55, 0), 0);
+check("just past halfway swaps", target(0, 62, 0), 1);
+check("two tiles right", target(0, STRIDE * 2, 0), 2);
+check("leftwards from the end of a row", target(2, -STRIDE, 0), 1);
 
-// Dragging from the middle must be symmetric.
-check("middle down half a row", target(2, H * 0.51), 3);
-check("middle up half a row", target(2, -H * 0.51), 1);
-check("middle unmoved", target(2, 0), 2);
+// Vertical — a whole row of travel.
+check("straight down one row", target(0, 0, STRIDE), 3);
+check("straight up one row", target(3, 0, -STRIDE), 0);
 
-// No oscillation: once swapped, the reverse condition must not immediately fire.
-check("no oscillation just past a swap (down)", target(0, H * 0.6), 1);
-check("no oscillation just past a swap (up)", target(4, -H * 0.6), 3);
+// The row-wrap boundary: last of row 1 -> first of row 2, which is
+// simultaneously a large horizontal and a vertical move.
+check("wrap forward: tile 2 to slot 3", target(2, -STRIDE * 2, STRIDE), 3);
+check("wrap backward: tile 3 to slot 2", target(3, STRIDE * 2, -STRIDE), 2);
+check("far corner", target(0, STRIDE * 2, STRIDE), 5);
 
-// Rows of unequal height, which is what the mobile cards actually are.
-const ragged = { tops: [0, 40, 140, 180], heights: [40, 100, 40, 60] };
-check("ragged: tall neighbour needs more travel", resolveDropTarget(0, 30, ragged, 4), 0);
-check("ragged: crossing the tall row's top edge swaps", resolveDropTarget(0, 60, ragged, 4), 1);
-check("ragged: out-of-range from returns from", resolveDropTarget(9, 60, ragged, 4), 9);
-check("empty geometry returns from", resolveDropTarget(0, 60, { tops: [], heights: [] }, 0), 0);
+// Clamping and guards.
+check("dragged far past everything clamps to nearest", target(0, 9999, 9999), 5);
+check("out-of-range from returns from", target(9, 0, 0), 9);
+check("empty geometry returns from", resolveGridDropTarget(0, 50, 50, { rects: [] }, 0), 0);
+
+// Hysteresis: the incumbent slot wins ties, so a tile parked between two slots
+// does not flicker. At dx=57 the rival is 4px closer — enough without a margin,
+// not enough with the default one.
+check("with no hysteresis a 4px edge is enough", target(0, 57, 0, 0), 1);
+check("default hysteresis holds the incumbent", target(0, 57, 0), 0);
+
+// ------------------------------------------------------------ slotOffsets
+check(
+  "adjacent swap moves only the displaced tile",
+  slotOffsets(0, 1, geo, 6),
+  [{ x: 0, y: 0 }, { x: -STRIDE, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }],
+);
+check(
+  "moving across a row wrap shifts a tile up and right",
+  slotOffsets(0, 3, geo, 6),
+  [
+    { x: 0, y: 0 },            // dragged: follows the pointer
+    { x: -STRIDE, y: 0 },      // 1 -> slot 0
+    { x: -STRIDE, y: 0 },      // 2 -> slot 1
+    { x: STRIDE * 2, y: -STRIDE }, // 3 -> slot 2, the wrap the old model could not express
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+  ],
+);
+check(
+  "backwards move pushes tiles forward",
+  slotOffsets(3, 0, geo, 6),
+  [
+    { x: STRIDE, y: 0 },       // 0 -> slot 1
+    { x: STRIDE, y: 0 },       // 1 -> slot 2
+    { x: -STRIDE * 2, y: STRIDE }, // 2 -> slot 3
+    { x: 0, y: 0 },            // dragged
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+  ],
+);
+check(
+  "same index yields no movement",
+  slotOffsets(2, 2, geo, 6),
+  Array.from({ length: 6 }, () => ({ x: 0, y: 0 })),
+);
+check(
+  "out-of-range yields no movement",
+  slotOffsets(0, 9, geo, 6),
+  Array.from({ length: 6 }, () => ({ x: 0, y: 0 })),
+);
+
+// Every offset must be reversible: applying from->to then to->from is identity.
+const forward = slotOffsets(0, 4, geo, 6);
+const backward = slotOffsets(4, 0, geo, 6);
+check(
+  "offsets are non-trivial in both directions",
+  [forward.some((o) => o.x || o.y), backward.some((o) => o.x || o.y)],
+  [true, true],
+);
+
+// ---------------------------------------------------------- columnsPerRow
+check("three columns detected", columnsPerRow(geo), 3);
+check("single column detected", columnsPerRow({
+  rects: [0, 1, 2].map((i) => ({ left: 0, top: i * STRIDE, width: TILE, height: TILE })),
+}), 1);
+check("empty geometry is one column", columnsPerRow({ rects: [] }), 1);
+check("sub-pixel tops still count as one row", columnsPerRow({
+  rects: [
+    { left: 0, top: 0, width: TILE, height: TILE },
+    { left: STRIDE, top: 0.4, width: TILE, height: TILE },
+    { left: 0, top: STRIDE, width: TILE, height: TILE },
+  ],
+}), 2);
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

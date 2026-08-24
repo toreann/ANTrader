@@ -5,7 +5,7 @@ import { Header } from "@/components/Header";
 import { IntervalPicker } from "@/components/IntervalPicker";
 import { PriceChart } from "@/components/PriceChart";
 import { SymbolManager } from "@/components/SymbolManager";
-import { WatchlistTable } from "@/components/WatchlistTable";
+import { WatchlistGrid } from "@/components/WatchlistGrid";
 import { useMarketData } from "@/lib/hooks/useMarketData";
 import { useWatchlist } from "@/lib/hooks/useWatchlist";
 import { formatPercent, formatPrice } from "@/lib/format";
@@ -16,10 +16,10 @@ import type { Interval } from "@/lib/binance/types";
  * reads as a single instrument rather than two mismatched cards.
  *
  * Stacked below xl they behave differently on purpose. The watchlist sizes to
- * its rows — pinning it left a screenful of dead space to scroll past before
- * reaching the chart. The chart, by contrast, always needs a real height: it
- * measures its own container, and `h-full` cannot resolve against a min-height
- * chain, which silently collapsed the canvas to just its time axis.
+ * its tiles — pinning it left a screenful of dead space to scroll past. The
+ * chart, by contrast, always needs a real height: it measures its own
+ * container, and `h-full` cannot resolve against a min-height chain, which
+ * silently collapsed the canvas to just its time axis.
  */
 const WATCHLIST_HEIGHT =
   // max-h must be released at xl, or it keeps capping the matched height.
@@ -84,43 +84,9 @@ export default function Dashboard() {
         </p>
       )}
 
+      {/* Chart first in source order, so it occupies the left column at xl and
+          sits at the top when stacked — it is the primary panel now. */}
       <main className="flex flex-1 flex-col gap-4 p-4 xl:grid xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] xl:items-start">
-        {/* Watchlist */}
-        <section className={`${WATCHLIST_HEIGHT} flex flex-col overflow-hidden rounded-lg border border-term-border bg-term-panel`}>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-term-border px-4 py-3">
-            <h2 className="text-[12px] font-semibold uppercase tracking-[0.14em] text-term-muted">
-              Watchlist
-            </h2>
-            <SymbolManager existing={symbols ?? []} onAdd={add} />
-          </div>
-
-          {/* The table scrolls inside the panel so the panel keeps its height
-              however many pairs are being watched. */}
-          <div className="min-h-0 flex-1 overflow-auto">
-            {symbols === null ? (
-              <p className="px-4 py-8 text-center text-[12px] text-term-dim">
-                Loading watchlist…
-              </p>
-            ) : (
-              <WatchlistTable
-                symbols={symbols}
-                tickers={tickers}
-                sparklines={sparklines}
-                meta={meta}
-                selected={selected}
-                onSelect={setSelected}
-                onRemove={remove}
-                onReorder={reorder}
-              />
-            )}
-          </div>
-
-          <p className="border-t border-term-border px-4 py-2 text-[11px] text-term-dim">
-            High, low and range cover a rolling 24-hour window — the same basis
-            exchanges quote.
-          </p>
-        </section>
-
         {/* Chart */}
         <section className={`${CHART_HEIGHT} flex flex-col overflow-hidden rounded-lg border border-term-border bg-term-panel`}>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-term-border px-4 py-3">
@@ -160,6 +126,42 @@ export default function Dashboard() {
               loading={chartLoading}
             />
           </div>
+        </section>
+
+        {/* Watchlist */}
+        <section className={`${WATCHLIST_HEIGHT} flex flex-col overflow-hidden rounded-lg border border-term-border bg-term-panel`}>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-term-border px-4 py-3">
+            <h2 className="text-[12px] font-semibold uppercase tracking-[0.14em] text-term-muted">
+              Watchlist
+            </h2>
+            <SymbolManager existing={symbols ?? []} onAdd={add} />
+          </div>
+
+          {/* The grid scrolls inside the panel so the panel keeps its height
+              however many pairs are being watched. */}
+          <div className="min-h-0 flex-1 overflow-auto">
+            {symbols === null ? (
+              <p className="px-4 py-8 text-center text-[12px] text-term-dim">
+                Loading watchlist…
+              </p>
+            ) : (
+              <WatchlistGrid
+                symbols={symbols}
+                tickers={tickers}
+                sparklines={sparklines}
+                meta={meta}
+                selected={selected}
+                onSelect={setSelected}
+                onRemove={remove}
+                onReorder={reorder}
+              />
+            )}
+          </div>
+
+          <p className="border-t border-term-border px-4 py-2 text-[11px] text-term-dim">
+            High, low and the trend line cover a rolling 24-hour window — the
+            same basis exchanges quote.
+          </p>
         </section>
       </main>
     </div>

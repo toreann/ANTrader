@@ -10,6 +10,12 @@ interface SparklineProps {
   /** Direction over the window, used only for colour. */
   positive: boolean;
   label: string;
+  /**
+   * Stretch to the container's height instead of a fixed 28px. Used inside the
+   * square tiles, where the trend line absorbs whatever height the square has
+   * left over.
+   */
+  fill?: boolean;
 }
 
 // Drawn in an abstract 100x28 box and stretched to whatever the cell allows.
@@ -20,7 +26,7 @@ const PAD_Y = 3;
 const UP = "#26d07c";
 const DOWN = "#f6465d";
 
-function SparklineImpl({ closes, live, positive, label }: SparklineProps) {
+function SparklineImpl({ closes, live, positive, label, fill }: SparklineProps) {
   // Gradient ids must be unique per instance: several of these render at once,
   // and duplicate ids in one document are invalid markup that resolves by
   // document order rather than by the element that declared it.
@@ -30,7 +36,7 @@ function SparklineImpl({ closes, live, positive, label }: SparklineProps) {
     // Still loading: a dim rule, so the column does not jump when data lands.
     return (
       <div
-        className="h-[28px] w-full min-w-16"
+        className={`w-full min-w-10 ${fill ? "h-full" : "h-[28px]"}`}
         role="img"
         aria-label={`${label} — trend loading`}
       >
@@ -83,7 +89,7 @@ function SparklineImpl({ closes, live, positive, label }: SparklineProps) {
   const tipPercent = (toY(live) / VIEW_H) * 100;
 
   return (
-    <div className="relative h-[28px] w-full min-w-16">
+    <div className={`relative w-full min-w-10 ${fill ? "h-full" : "h-[28px]"}`}>
       <svg
         viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
         preserveAspectRatio="none"
