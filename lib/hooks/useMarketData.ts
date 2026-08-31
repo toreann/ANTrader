@@ -9,9 +9,18 @@ import {
   fetchTickerSnapshot,
 } from "@/lib/binance/rest";
 import { klineStream, tickerStream } from "@/lib/binance/streams";
+import {
+  fetchJupiterChart,
+  fetchJupiterMeta,
+  fetchJupiterPrices,
+  fetchJupiterWindow,
+  toJupiterTicker,
+} from "@/lib/jupiter/rest";
+import { entryKey, type WatchEntry } from "@/lib/watchlist";
 import type {
   Candle,
   ConnectionStatus,
+  VenueStatus,
   Interval,
   RawKlineEvent,
   RawTickerEvent,
@@ -24,32 +33,45 @@ import type {
  * setState per message.
  *
  * Binance pushes each `@ticker` about once a second, staggered across symbols —
- * so a 10-pair watchlist would otherwise re-render the table ~10 times a second
+ * so a 10-pair watchlist would otherwise re-render the grid ~10 times a second
  * at unpredictable moments. Coalescing on a fixed interval bounds re-renders to
- * a constant regardless of how many pairs are being watched, while staying far
- * below the threshold where the eye notices any delay.
+ * a constant regardless of how many pairs are watched, while staying far below
+ * the threshold where the eye notices any delay.
  */
 const FLUSH_INTERVAL_MS = 100;
 
-/**
- * How often the per-row trend lines are refetched.
- *
- * Their live tip already comes from the ticker stream, so this only has to keep
- * the 24h window from sliding out of date as candles roll over. Five minutes
- * costs one small request per pair and keeps the line honest; subscribing to a
- * kline stream per pair would push an event every second to learn something
- * that changes every thirty minutes.
- */
+/** How often the Binance trend lines are refetched. */
 const SPARKLINE_REFRESH_MS = 5 * 60 * 1000;
 
+/**
+ * How often Jupiter prices are polled.
+ *
+ * Jupiter has no WebSocket, and `price/v3` answers with
+ * `cache-control: max-age=5` — so polling faster returns the same numbers and
+ * only burns rate limit. This is the honest ceiling on how live a Solana tile
+ * can be, and the UI labels the venue rather than pretending otherwise.
+ */
+const JUPITER_POLL_MS = 5_000;
+
+/**
+ * How often the derived 24h window is recomputed for Solana tokens.
+ *
+ * Jupiter publishes no extremes at all, so high/low come from a candle series.
+ * Between refreshes they are widened by the live price, which is what makes a
+ * new high appear immediately rather than up to five minutes late.
+ */
+const JUPITER_WINDOW_REFRESH_MS = 5 * 60 * 1000;
+
 interface MarketDataArgs {
-  symbols: string[] | null;
-  chartSymbol: string | null;
+  entries: WatchEntry[] | null;
+  /** The selected entry, whose candles feed the main chart. */
+  selected: WatchEntry | null;
   interval: Interval;
 }
 
 function tickerFromEvent(event: RawTickerEvent): Ticker {
   return {
+    source: "binance",
     symbol: event.s,
     last: Number(event.c),
     open: Number(event.o),
@@ -73,18 +95,27 @@ function candleFromEvent(event: RawKlineEvent): Candle {
 }
 
 /**
- * Owns the single Binance socket and every piece of live state derived from it.
+ * Owns every live data path the dashboard has: one Binance socket and one
+ * Jupiter poller.
  *
- * Deliberately one hook rather than separate ticker/kline hooks: the dashboard
- * must use exactly one connection, and a single owner enforces that directly
- * instead of requiring two hooks to share a socket through an event emitter.
+ * Deliberately one hook. The single-connection requirement for Binance is
+ * enforced directly by having a single owner, and keying every map by
+ * `entryKey` means the two venues coexist without the UI needing to know which
+ * is which except to label it.
  */
-export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs) {
+export function useMarketData({ entries, selected, interval }: MarketDataArgs) {
   const [tickers, setTickers] = useState<Map<string, Ticker>>(new Map());
   const [sparklines, setSparklines] = useState<Map<string, number[]>>(new Map());
   const [meta, setMeta] = useState<Map<string, SymbolMeta>>(new Map());
-  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const [socketStatus, setSocketStatus] =
+    useState<ConnectionStatus>("connecting");
+  const [jupiterStatus, setJupiterStatus] =
+    useState<ConnectionStatus>("connecting");
   const [lastTickAt, setLastTickAt] = useState<number | null>(null);
+  // Per-venue "last time this path actually answered", which is what makes a
+  // silently stalled feed distinguishable from a quiet market.
+  const [binanceOkAt, setBinanceOkAt] = useState<number | null>(null);
+  const [jupiterOkAt, setJupiterOkAt] = useState<number | null>(null);
 
   const [history, setHistory] = useState<Candle[]>([]);
   const [liveCandle, setLiveCandle] = useState<Candle | null>(null);
@@ -95,14 +126,35 @@ export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs
   const pending = useRef<Map<string, RawTickerEvent>>(new Map());
   const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Latest values the socket callbacks need, without re-creating the socket.
-  const symbolsRef = useRef<string[]>([]);
-  const chartRef = useRef<{ symbol: string | null; interval: Interval }>({
-    symbol: chartSymbol,
+  // ---- Split the watchlist by venue, stably ----
+  const binanceSymbols = useMemo(
+    () =>
+      (entries ?? [])
+        .filter((e) => e.source === "binance")
+        .map((e) => e.id),
+    [entries],
+  );
+  const jupiterMints = useMemo(
+    () =>
+      (entries ?? [])
+        .filter((e) => e.source === "jupiter")
+        .map((e) => e.id),
+    [entries],
+  );
+  // Joined keys so effects depend on content rather than array identity.
+  const binanceKey = binanceSymbols.join(",");
+  const jupiterKey = jupiterMints.join(",");
+
+  const binanceRef = useRef<string[]>([]);
+  binanceRef.current = binanceSymbols;
+
+  const chartRef = useRef<{ entry: WatchEntry | null; interval: Interval }>({
+    entry: selected,
     interval,
   });
-  chartRef.current = { symbol: chartSymbol, interval };
+  chartRef.current = { entry: selected, interval };
 
+  // ---- Binance: coalesced socket ingest ----
   const flush = useCallback(() => {
     const batch = pending.current;
     if (batch.size === 0) return;
@@ -110,11 +162,13 @@ export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs
     setTickers((current) => {
       const next = new Map(current);
       for (const [symbol, event] of batch) {
-        next.set(symbol, tickerFromEvent(event));
+        next.set(`binance:${symbol}`, tickerFromEvent(event));
       }
       return next;
     });
-    setLastTickAt(Date.now());
+    const now = Date.now();
+    setLastTickAt(now);
+    setBinanceOkAt(now);
   }, []);
 
   const scheduleFlush = useCallback(() => {
@@ -125,19 +179,18 @@ export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs
     }, FLUSH_INTERVAL_MS);
   }, [flush]);
 
-  /** Pull a fresh REST snapshot — on first load and after every reconnect. */
-  const snapshot = useCallback(async (list: string[]) => {
-    if (list.length === 0) return;
+  /** REST snapshot — on first load and after every reconnect. */
+  const snapshot = useCallback(async (symbols: string[]) => {
+    if (symbols.length === 0) return;
     try {
-      const rows = await fetchTickerSnapshot(list);
+      const rows = await fetchTickerSnapshot(symbols);
       setTickers((current) => {
         const next = new Map(current);
-        for (const row of rows) {
-          next.set(row.symbol, row);
-        }
+        for (const row of rows) next.set(`binance:${row.symbol}`, row);
         return next;
       });
       setLastTickAt(Date.now());
+      setBinanceOkAt(Date.now());
       setError(null);
     } catch (cause) {
       setError(
@@ -148,21 +201,17 @@ export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs
 
   /** The exact set of streams the dashboard wants carried right now. */
   const desiredStreams = useMemo(() => {
-    if (!symbols || symbols.length === 0) return [];
-    const streams = symbols.map(tickerStream);
-    if (chartSymbol) streams.push(klineStream(chartSymbol, interval));
+    if (binanceSymbols.length === 0) return [];
+    const streams = binanceSymbols.map(tickerStream);
+    if (selected?.source === "binance") {
+      streams.push(klineStream(selected.id, interval));
+    }
     return streams;
-  }, [symbols, chartSymbol, interval]);
+  }, [binanceSymbols, selected, interval]);
 
-  // Read by the socket-creation effect, which must not re-run when streams change.
   const desiredStreamsRef = useRef<string[]>(desiredStreams);
   desiredStreamsRef.current = desiredStreams;
 
-  useEffect(() => {
-    symbolsRef.current = symbols ?? [];
-  }, [symbols]);
-
-  // ---- Socket lifecycle: created once, subscriptions reconciled separately ----
   useEffect(() => {
     const socket = new BinanceSocket({
       onTicker: (event) => {
@@ -173,18 +222,20 @@ export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs
         const current = chartRef.current;
         // Late messages from a stream we just unsubscribed from must not
         // corrupt the chart we have already switched to.
-        if (event.s !== current.symbol || event.k.i !== current.interval) return;
+        if (current.entry?.source !== "binance") return;
+        if (event.s !== current.entry.id || event.k.i !== current.interval) {
+          return;
+        }
         setLiveCandle(candleFromEvent(event));
       },
-      onStatus: setStatus,
+      onStatus: setSocketStatus,
       onConnected: () => {
-        void snapshot(symbolsRef.current);
+        void snapshot(binanceRef.current);
       },
     });
     socketRef.current = socket;
     // sync() here as well as in the reconcile effect below: whichever runs
-    // first wins, and the other becomes a no-op. Neither effect has to know
-    // about the other's ordering.
+    // first wins, and the other becomes a no-op.
     socket.sync(desiredStreamsRef.current);
 
     return () => {
@@ -198,41 +249,151 @@ export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs
     };
   }, [scheduleFlush, snapshot]);
 
-  // ---- Reconcile the desired stream set whenever inputs change ----
   useEffect(() => {
     socketRef.current?.sync(desiredStreams);
   }, [desiredStreams]);
 
-  // ---- Symbol metadata (price precision), fetched once per new symbol ----
-  useEffect(() => {
-    if (!symbols || symbols.length === 0) return;
-    let cancelled = false;
-    fetchSymbolMeta(symbols)
-      .then((found) => {
-        if (!cancelled) setMeta(found);
-      })
-      .catch(() => {
-        /* Formatting falls back to a sane default when metadata is missing. */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [symbols]);
 
-  // ---- Per-row 24h trend lines ----
+
+  // ---- Jupiter: price polling ----
   useEffect(() => {
-    if (!symbols || symbols.length === 0) return;
+    if (jupiterMints.length === 0) return;
+    const controller = new AbortController();
+
+    const poll = async () => {
+      try {
+        const prices = await fetchJupiterPrices(jupiterMints, controller.signal);
+        if (controller.signal.aborted) return;
+        setTickers((current) => {
+          const next = new Map(current);
+          for (const [mint, price] of prices) {
+            const key = `jupiter:${mint}`;
+            const previous = next.get(key);
+            // Reuse the extremes already derived from candles; the constructor
+            // widens them with the new live price.
+            const window = previous
+              ? { high24h: previous.high24h, low24h: previous.low24h, closes: [] }
+              : null;
+            next.set(key, toJupiterTicker(mint, price, window));
+          }
+          return next;
+        });
+        const now = Date.now();
+        setLastTickAt(now);
+        setJupiterOkAt(now);
+        setJupiterStatus("live");
+        setError(null);
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        // The interval keeps running, so this is a retry state rather than a
+        // terminal one — same semantics as the socket reconnecting.
+        setJupiterStatus("reconnecting");
+        setError(
+          cause instanceof Error ? cause.message : "Failed to reach Jupiter",
+        );
+      }
+    };
+
+    setJupiterStatus((current) => (current === "live" ? current : "connecting"));
+    void poll();
+    const timer = setInterval(() => void poll(), JUPITER_POLL_MS);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jupiterKey]);
+
+  // ---- Jupiter: derived 24h window, which also supplies the trend line ----
+  useEffect(() => {
+    if (jupiterMints.length === 0) return;
     const controller = new AbortController();
 
     const load = async () => {
-      const found = await fetchSparklines(symbols, controller.signal);
+      const results = await Promise.allSettled(
+        jupiterMints.map(async (mint) => ({
+          mint,
+          window: await fetchJupiterWindow(mint, controller.signal),
+        })),
+      );
+      if (controller.signal.aborted) return;
+
+      setTickers((current) => {
+        const next = new Map(current);
+        for (const result of results) {
+          if (result.status !== "fulfilled" || !result.value.window) continue;
+          const key = `jupiter:${result.value.mint}`;
+          const existing = next.get(key);
+          if (!existing) continue;
+          const { high24h, low24h } = result.value.window;
+          next.set(key, {
+            ...existing,
+            high24h: Math.max(high24h, existing.last),
+            low24h: Math.min(low24h, existing.last),
+          });
+        }
+        return next;
+      });
+
+      setSparklines((current) => {
+        const next = new Map(current);
+        for (const result of results) {
+          if (result.status !== "fulfilled" || !result.value.window) continue;
+          next.set(`jupiter:${result.value.mint}`, result.value.window.closes);
+        }
+        return next;
+      });
+    };
+
+    void load();
+    const timer = setInterval(() => void load(), JUPITER_WINDOW_REFRESH_MS);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jupiterKey]);
+
+  // ---- Metadata (precision, display symbols) for both venues ----
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const merged = new Map<string, SymbolMeta>();
+      const [binance, jupiter] = await Promise.allSettled([
+        binanceSymbols.length > 0
+          ? fetchSymbolMeta(binanceSymbols)
+          : Promise.resolve(new Map<string, SymbolMeta>()),
+        jupiterMints.length > 0
+          ? fetchJupiterMeta(jupiterMints)
+          : Promise.resolve(new Map<string, SymbolMeta>()),
+      ]);
+      if (binance.status === "fulfilled") {
+        for (const [symbol, m] of binance.value) merged.set(`binance:${symbol}`, m);
+      }
+      if (jupiter.status === "fulfilled") {
+        for (const [mint, m] of jupiter.value) merged.set(`jupiter:${mint}`, m);
+      }
+      if (!cancelled) setMeta(merged);
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [binanceKey, jupiterKey]);
+
+  // ---- Binance trend lines (Jupiter's come from the window above) ----
+  useEffect(() => {
+    if (binanceSymbols.length === 0) return;
+    const controller = new AbortController();
+
+    const load = async () => {
+      const found = await fetchSparklines(binanceSymbols, controller.signal);
       if (controller.signal.aborted) return;
       setSparklines((current) => {
         const next = new Map(current);
-        for (const [symbol, closes] of found) next.set(symbol, closes);
-        // Drop pairs that are no longer watched, so the map cannot grow forever.
-        for (const symbol of next.keys()) {
-          if (!symbols.includes(symbol)) next.delete(symbol);
+        for (const [symbol, closes] of found) {
+          next.set(`binance:${symbol}`, closes);
         }
         return next;
       });
@@ -244,17 +405,46 @@ export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs
       controller.abort();
       clearInterval(timer);
     };
-  }, [symbols]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [binanceKey]);
 
-  // ---- Candle history for the selected pair and interval ----
+  // ---- Prune state for entries that are no longer watched ----
+  const watchedKeys = useMemo(
+    () => new Set((entries ?? []).map(entryKey)),
+    [entries],
+  );
   useEffect(() => {
-    if (!chartSymbol) return;
+    if (!entries) return;
+    const prune = <T,>(map: Map<string, T>) => {
+      let changed = false;
+      const next = new Map(map);
+      for (const key of next.keys()) {
+        if (!watchedKeys.has(key)) {
+          next.delete(key);
+          changed = true;
+        }
+      }
+      return changed ? next : map;
+    };
+    setTickers((current) => prune(current));
+    setSparklines((current) => prune(current));
+  }, [entries, watchedKeys]);
+
+  // ---- Candle history for the selected entry ----
+  useEffect(() => {
+    if (!selected) return;
     const controller = new AbortController();
     setChartLoading(true);
     setLiveCandle(null);
 
-    fetchKlines(chartSymbol, interval, 500, controller.signal)
+    const load =
+      selected.source === "binance"
+        ? fetchKlines(selected.id, interval, 500, controller.signal)
+        : fetchJupiterChart(selected.id, interval, 500, controller.signal);
+
+    load
       .then((candles) => {
+        if (controller.signal.aborted) return;
         setHistory(candles);
         setChartLoading(false);
         setError(null);
@@ -268,16 +458,57 @@ export function useMarketData({ symbols, chartSymbol, interval }: MarketDataArgs
       });
 
     return () => controller.abort();
-  }, [chartSymbol, interval]);
+  }, [selected, interval]);
+
+  /**
+   * Jupiter cannot stream candles, so the open candle is advanced from the
+   * polled price instead: same timestamp, close set to the live price and the
+   * extremes widened. Without this a Solana chart would sit frozen between
+   * history refetches.
+   */
+  const selectedKey = selected ? entryKey(selected) : null;
+  const selectedTicker = selectedKey ? tickers.get(selectedKey) : undefined;
+  const syntheticCandle = useMemo<Candle | null>(() => {
+    if (selected?.source !== "jupiter") return null;
+    if (!selectedTicker || history.length === 0) return null;
+    const last = history[history.length - 1];
+    const price = selectedTicker.last;
+    return {
+      time: last.time,
+      open: last.open,
+      high: Math.max(last.high, price),
+      low: Math.min(last.low, price),
+      close: price,
+    };
+  }, [selected?.source, selectedTicker, history]);
+
+  /**
+   * A venue with nothing watched is `idle`, not `live`. Reporting "live" for a
+   * path that is not being exercised claims a healthy connection that has not
+   * actually been demonstrated.
+   */
+  const venueStatus = useMemo<VenueStatus>(
+    () => ({
+      binance: binanceSymbols.length === 0 ? "idle" : socketStatus,
+      jupiter: jupiterMints.length === 0 ? "idle" : jupiterStatus,
+    }),
+    [binanceSymbols.length, jupiterMints.length, socketStatus, jupiterStatus],
+  );
+
+  const venueLastOk = useMemo(
+    () => ({ binance: binanceOkAt, jupiter: jupiterOkAt }),
+    [binanceOkAt, jupiterOkAt],
+  );
 
   return {
     tickers,
     sparklines,
     meta,
-    status,
+    venueStatus,
+    venueLastOk,
     lastTickAt,
     history,
-    liveCandle,
+    liveCandle: selected?.source === "jupiter" ? syntheticCandle : liveCandle,
     chartLoading,
     error,
   };

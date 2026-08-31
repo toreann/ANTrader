@@ -40,6 +40,7 @@ export function decimalsFromTickSize(tickSize: string): number {
 
 function toTicker(raw: RawTicker24h): Ticker {
   return {
+    source: "binance",
     symbol: raw.symbol,
     last: Number(raw.lastPrice),
     open: Number(raw.openPrice),
@@ -127,6 +128,7 @@ export async function fetchSymbolMeta(
         s.filters.find((f) => f.filterType === "PRICE_FILTER")?.tickSize ??
         "0.01";
       metaCache.set(s.symbol, {
+        source: "binance",
         symbol: s.symbol,
         baseAsset: s.baseAsset,
         quoteAsset: s.quoteAsset,
@@ -193,6 +195,95 @@ export async function fetchSparklines(
     }
   }
   return map;
+}
+
+/**
+ * Quote assets worth surfacing first, best-known last so `indexOf` scores them.
+ *
+ * Binance lists thousands of pairs and has no search endpoint, so relevance has
+ * to be decided here. Without this, searching "BTC" buries BTCUSDT under
+ * BTCAUD, BTCBIDR and a dozen others.
+ */
+const QUOTE_PREFERENCE = [
+  "BNB",
+  "ETH",
+  "BTC",
+  "TRY",
+  "EUR",
+  "FDUSD",
+  "USDC",
+  "USDT",
+];
+
+let universe: string[] | null = null;
+
+/**
+ * Every spot symbol, for client-side search.
+ *
+ * Binance has no symbol-search endpoint, so the list has to be held locally.
+ * This uses `/ticker/price` (~156KB for ~3.7k symbols) rather than
+ * `/exchangeInfo`, which is **17MB** for the same coverage — a 100x difference
+ * for data we would throw away. Fetched lazily on first search, not on load, so
+ * a user who never searches never pays for it.
+ */
+export async function fetchSymbolUniverse(
+  signal?: AbortSignal,
+): Promise<string[]> {
+  if (universe) return universe;
+  const rows = await getJson<{ symbol: string }[]>("/ticker/price", signal);
+  universe = rows.map((row) => row.symbol);
+  return universe;
+}
+
+/**
+ * Binance's leveraged-token naming. These are largely dead products, and
+ * without volume data they would otherwise fill the results for any major —
+ * searching "BTC" surfaced BTCUP, BTCDOWN and BTCST before BTCUSDC.
+ */
+const LEVERAGED_SUFFIX = /(?:UP|DOWN|BULL|BEAR)$/;
+
+/** Score a candidate against the query; higher is more relevant. */
+function score(symbol: string, query: string): number {
+  if (symbol === query) return 1000;
+  let value = 0;
+  if (symbol.startsWith(query)) value += 500;
+
+  const quote = QUOTE_PREFERENCE.find((q) => symbol.endsWith(q));
+  if (quote) {
+    value += 10 * (QUOTE_PREFERENCE.indexOf(quote) + 1);
+    // Only test the base for the leveraged pattern, so a quote asset ending in
+    // those letters cannot be mistaken for one.
+    const base = symbol.slice(0, -quote.length);
+    if (LEVERAGED_SUFFIX.test(base)) value -= 400;
+  }
+
+  // Majors have short tickers, so brevity is a decent tiebreaker.
+  value -= symbol.length;
+  return value;
+}
+
+/** Pure ranking, split out so it can be tested without the network. */
+export function rankBinanceSymbols(
+  symbols: string[],
+  query: string,
+  limit = 6,
+): string[] {
+  const needle = query.trim().toUpperCase();
+  if (!needle) return [];
+  return symbols
+    .filter((symbol) => symbol.includes(needle))
+    .sort((a, b) => score(b, needle) - score(a, needle))
+    .slice(0, limit);
+}
+
+/** Ranked spot symbols matching a free-text query. */
+export async function searchBinanceSymbols(
+  query: string,
+  limit = 6,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  if (!query.trim()) return [];
+  return rankBinanceSymbols(await fetchSymbolUniverse(signal), query, limit);
 }
 
 /** Cheapest reachability check Binance offers (request weight 1). */

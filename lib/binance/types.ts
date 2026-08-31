@@ -59,12 +59,25 @@ export interface RawTicker24h {
 }
 
 /**
+ * Where a quote came from.
+ *
+ * The two venues differ in a way the UI has to be honest about: Binance pushes
+ * over a WebSocket about once a second, while Jupiter is REST-only and its price
+ * endpoint sends `cache-control: max-age=5`, so Solana tokens can only refresh
+ * on a poll.
+ */
+export type MarketSource = "binance" | "jupiter";
+
+/**
  * Normalized ticker consumed by the UI.
  *
- * `high24h` / `low24h` are Binance's *rolling* 24-hour window — the same figures
- * shown on exchange sites and TradingView, not a calendar-day session range.
+ * `high24h` / `low24h` are always a *rolling* 24-hour window — the basis
+ * exchanges quote, not a calendar-day session range. Binance supplies them
+ * directly; for Jupiter they are derived from candles, because its price
+ * endpoint carries no extremes at all.
  */
 export interface Ticker {
+  source: MarketSource;
   symbol: string;
   last: number;
   open: number;
@@ -85,8 +98,9 @@ export interface Candle {
   close: number;
 }
 
-/** Per-symbol trading rules we care about, from `exchangeInfo`. */
+/** Per-symbol display and precision rules. */
 export interface SymbolMeta {
+  source: MarketSource;
   symbol: string;
   baseAsset: string;
   quoteAsset: string;
@@ -94,6 +108,20 @@ export interface SymbolMeta {
   tickSize: string;
   /** Decimal places derived from tickSize. Never hardcode this. */
   priceDecimals: number;
+  /** Solana mint address. Jupiter only; absent for Binance pairs. */
+  mint?: string;
+  /**
+   * The token's ON-CHAIN decimals — how many base units make one whole token
+   * (9 for SOL, 6 for USDC).
+   *
+   * Emphatically NOT `priceDecimals`, which is only how many digits to display.
+   * Confusing the two silently misquotes an amount by orders of magnitude, so
+   * anything converting to base units must use this and must refuse to guess
+   * when it is absent.
+   */
+  tokenDecimals?: number;
+  /** Token icon URL, when the venue provides one. */
+  icon?: string;
 }
 
 /**
@@ -115,4 +143,21 @@ export type KlineInterval =
 export const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 export type Interval = (typeof INTERVALS)[number];
 
-export type ConnectionStatus = "connecting" | "live" | "reconnecting";
+/**
+ * Health of one venue's data path.
+ *
+ * `idle` matters: with nothing watched from a venue there is nothing being
+ * fetched, and reporting "live" in that case would claim a healthy connection
+ * that does not exist.
+ */
+export type ConnectionStatus =
+  | "idle"
+  | "connecting"
+  | "live"
+  | "reconnecting";
+
+/** Per-venue health, so one venue failing cannot be hidden by the other. */
+export interface VenueStatus {
+  binance: ConnectionStatus;
+  jupiter: ConnectionStatus;
+}

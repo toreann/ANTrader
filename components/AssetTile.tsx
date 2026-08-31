@@ -3,6 +3,8 @@
 import { memo } from "react";
 import { DragHandle } from "@/components/DragHandle";
 import { Sparkline } from "@/components/Sparkline";
+import { CopyContractButton } from "@/components/CopyContractButton";
+import { VenueBadge } from "@/components/VenueBadge";
 import { usePriceFlash } from "@/lib/hooks/usePriceFlash";
 import { formatPercent, formatPrice } from "@/lib/format";
 import type { TileReorderProps } from "@/lib/hooks/useReorder";
@@ -14,10 +16,14 @@ interface AssetTileProps {
   /** 24h closing prices for the trend line; undefined while still loading. */
   closes: number[] | undefined;
   selected: boolean;
-  onSelect: (symbol: string) => void;
-  onRemove: (symbol: string) => void;
+  /** Stable venue-qualified key, e.g. `binance:BTCUSDT` or `jupiter:<mint>`. */
+  entryKey: string;
+  onSelect: (key: string) => void;
+  onRemove: (key: string) => void;
   removable: boolean;
   reorder: TileReorderProps;
+  /** Exposes the tile element, so the chart's resize drag can measure a cell. */
+  outerRef?: (element: HTMLElement | null) => void;
 }
 
 /**
@@ -33,16 +39,24 @@ function AssetTileImpl({
   meta,
   closes,
   selected,
+  entryKey,
   onSelect,
   onRemove,
   removable,
   reorder,
+  outerRef,
 }: AssetTileProps) {
   const priceRef = usePriceFlash<HTMLSpanElement>(ticker.last);
   // Price precision comes from the exchange's tickSize; 2 is only the fallback
   // for the brief window before exchangeInfo resolves.
   const decimals = meta?.priceDecimals ?? 2;
-  const pair = meta ? `${meta.baseAsset}/${meta.quoteAsset}` : ticker.symbol;
+  const pair = meta
+    ? `${meta.baseAsset}/${meta.quoteAsset}`
+    : ticker.source === "jupiter"
+      // Until metadata resolves, a raw mint is 44 characters of base58 — show
+      // enough to be recognisable without blowing the tile apart.
+      ? `${ticker.symbol.slice(0, 4)}…${ticker.symbol.slice(-4)}`
+      : ticker.symbol;
 
   const up = ticker.changePct > 0;
   const down = ticker.changePct < 0;
@@ -54,19 +68,30 @@ function AssetTileImpl({
 
   const { offset, dragging, dragActive } = reorder;
 
+  /**
+   * On-chain address, when the market has one.
+   *
+   * Keyed off the presence of a mint rather than the venue name, so a second DEX
+   * would get the copy button without touching this. Binance pairs have no
+   * address at all — an exchange symbol is not a contract.
+   */
+  const contract =
+    meta?.mint ?? (ticker.source === "jupiter" ? ticker.symbol : undefined);
+
   return (
     <div
+      ref={outerRef}
       role="button"
       tabIndex={0}
       aria-pressed={selected}
       onClick={() => {
         if (reorder.shouldIgnoreClick()) return;
-        onSelect(ticker.symbol);
+        onSelect(entryKey);
       }}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          onSelect(ticker.symbol);
+          onSelect(entryKey);
         }
       }}
       onPointerDown={reorder.onBodyPointerDown}
@@ -113,10 +138,13 @@ function AssetTileImpl({
           onClick={(event) => {
             // Removing must not also select the tile being removed.
             event.stopPropagation();
-            onRemove(ticker.symbol);
+            onRemove(entryKey);
           }}
+          // Stops the tile treating this press as the start of a drag.
+          onPointerDown={(event) => event.stopPropagation()}
           aria-label={`Remove ${pair} from the watchlist`}
-          className="shrink-0 rounded px-1 text-term-dim transition-colors hover:bg-term-border hover:text-term-text disabled:cursor-not-allowed disabled:text-transparent"
+          // 24x24 like the other tile controls, for WCAG 2.5.8's minimum.
+          className="grid size-6 shrink-0 place-items-center rounded text-term-dim transition-colors hover:bg-term-border hover:text-term-text disabled:cursor-not-allowed disabled:text-transparent"
         >
           ×
         </button>
@@ -134,12 +162,18 @@ function AssetTileImpl({
         >
           {formatPrice(ticker.last, decimals)}
         </span>
-        <span
-          className={`num mt-0.5 inline-block rounded px-1 py-0.5 text-[10px] font-medium ${changeColor} ${
-            up ? "bg-term-up/10" : down ? "bg-term-down/10" : ""
-          }`}
-        >
-          {formatPercent(ticker.changePct)}
+        <span className="mt-0.5 flex items-center gap-1.5">
+          <span
+            className={`num rounded px-1 py-0.5 text-[10px] font-medium ${changeColor} ${
+              up ? "bg-term-up/10" : down ? "bg-term-down/10" : ""
+            }`}
+          >
+            {formatPercent(ticker.changePct)}
+          </span>
+          <VenueBadge source={ticker.source} />
+          {contract && (
+            <CopyContractButton address={contract} label={pair} />
+          )}
         </span>
       </div>
 
