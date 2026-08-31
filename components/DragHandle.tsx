@@ -36,7 +36,8 @@ export function DragHandle({
       onKeyDown={onKeyDown}
       // Stop the press from also selecting the row.
       onClick={(event) => event.stopPropagation()}
-      className={`rounded px-1 py-0.5 text-term-dim transition-colors hover:bg-term-border hover:text-term-text ${
+      // 24x24 hit area around the small grip glyph, per WCAG 2.5.8.
+      className={`grid size-6 shrink-0 place-items-center rounded text-term-dim transition-colors hover:bg-term-border hover:text-term-text ${
         dragging ? "cursor-grabbing text-term-text" : "cursor-grab"
       }`}
       // Without this the browser scrolls the panel instead of reporting the

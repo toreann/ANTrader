@@ -43,8 +43,12 @@ export function PriceChart({
 
     const chart = createChart(container, {
       // autoSize wires up a ResizeObserver internally, so the chart tracks its
-      // flex parent without us maintaining a second observer.
+      // container through both window resizes and the user dragging the panel
+      // divider. The explicit width/height below are not redundant: the library
+      // falls back to them if ResizeObserver is unavailable.
       autoSize: true,
+      width: container.clientWidth,
+      height: container.clientHeight,
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
         textColor: AXIS_TEXT,

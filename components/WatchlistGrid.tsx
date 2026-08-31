@@ -2,62 +2,71 @@
 
 import { AssetTile } from "@/components/AssetTile";
 import { useReorder } from "@/lib/hooks/useReorder";
+import { entryKey, type WatchEntry } from "@/lib/watchlist";
 import type { SymbolMeta, Ticker } from "@/lib/binance/types";
 
 interface WatchlistGridProps {
-  symbols: string[];
+  entries: WatchEntry[];
   tickers: Map<string, Ticker>;
   sparklines: Map<string, number[]>;
   meta: Map<string, SymbolMeta>;
-  selected: string | null;
-  onSelect: (symbol: string) => void;
-  onRemove: (symbol: string) => void;
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
+  onRemove: (key: string) => void;
   onReorder: (from: number, to: number) => void;
+  /**
+   * Receives the first tile, so the chart's resize drag can read one cell's
+   * size. Taken from a real tile rather than computed from the grid, because the
+   * tile is the thing whose square shape defines the cell.
+   */
+  firstTileRef?: (element: HTMLElement | null) => void;
 }
 
 /**
- * The watchlist as a grid of square tiles.
+ * The watchlist tiles.
  *
- * One presentation for every screen size, which is why there is a single
- * `useReorder` instance here. The previous table-plus-cards arrangement mounted
- * both and switched them with CSS, so it needed one instance per presentation —
- * the hidden one having zero-height rects and therefore useless geometry.
+ * `display: contents` on the wrapper is load-bearing: the tiles must be direct
+ * grid items of the *page* grid so they flow around the chart, which occupies an
+ * N x N block of the same grid. A wrapper that formed its own box would put the
+ * whole watchlist beside the chart instead of around it.
  *
- * `auto-fill` with a minimum tile width lets the column count follow the panel
- * rather than a breakpoint, so the same grid works in the narrow desktop column
- * and full-width on a phone.
+ * Reordering still works through this, because `useReorder` reads geometry from
+ * `container.children` — and `display: contents` removes the wrapper's box, not
+ * its children.
+ *
+ * Everything is keyed by `entryKey` (`binance:BTCUSDT`, `jupiter:<mint>`) so a
+ * Binance pair and a Solana token that share a ticker symbol cannot collide.
  */
 export function WatchlistGrid({
-  symbols,
+  entries,
   tickers,
   sparklines,
   meta,
-  selected,
+  selectedKey,
   onSelect,
   onRemove,
   onReorder,
+  firstTileRef,
 }: WatchlistGridProps) {
-  const reorder = useReorder(symbols.length, onReorder);
+  const reorder = useReorder(entries.length, onReorder);
 
   return (
-    <div
-      ref={reorder.setContainer}
-      // -mt-px/-ml-px with collapsed tile borders would double up; instead the
-      // gap is a real gap so each square reads as its own cell in the grid.
-      className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-2 p-2"
-    >
-      {symbols.map((symbol, index) => {
-        const ticker = tickers.get(symbol);
+    <div ref={reorder.setContainer} style={{ display: "contents" }}>
+      {entries.map((entry, index) => {
+        const key = entryKey(entry);
+        const ticker = tickers.get(key);
         if (!ticker) {
-          // Waiting on the first snapshot for a freshly added pair. Rendered as
-          // a tile so `children[i]` still maps to entry `i` for drag geometry.
+          // Waiting on the first read for a freshly added entry. Rendered as a
+          // tile so `children[i]` still maps to entry `i` for drag geometry.
           return (
             <div
-              key={symbol}
+              key={key}
               className="flex aspect-square flex-col justify-center border border-term-border bg-term-panel p-2.5 text-center"
             >
               <span className="num truncate text-[11px] font-semibold">
-                {symbol}
+                {entry.source === "jupiter"
+                  ? `${entry.id.slice(0, 4)}…${entry.id.slice(-4)}`
+                  : entry.id}
               </span>
               <span className="mt-1 text-[10px] text-term-dim">loading…</span>
             </div>
@@ -65,14 +74,16 @@ export function WatchlistGrid({
         }
         return (
           <AssetTile
-            key={symbol}
+            key={key}
+            outerRef={index === 0 ? firstTileRef : undefined}
+            entryKey={key}
             ticker={ticker}
-            meta={meta.get(symbol)}
-            closes={sparklines.get(symbol)}
-            selected={selected === symbol}
+            meta={meta.get(key)}
+            closes={sparklines.get(key)}
+            selected={selectedKey === key}
             onSelect={onSelect}
             onRemove={onRemove}
-            removable={symbols.length > 1}
+            removable={entries.length > 1}
             reorder={reorder.tileProps(index)}
           />
         );
